@@ -1,0 +1,65 @@
+# Build output
+build/
+build-*/
+out/
+cmake-build-*/
+CMakeUserPresets.json
+
+# Shared FetchContent source cache (Catch2/ENet/JUCE), warmed by
+# scripts/bootstrap.py and reused across every preset's own build-*/ dir.
+deps-cache/
+# scripts/bootstrap.py's own throwaway fetch dir - only survives a failed run.
+.bootstrap-scratch/
+
+# Compiled artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+
+# Licence-encumbered SDKs. These are user-supplied, never committed, and
+# their own licences forbid redistributing them here. Keeping them listed
+# means an accidental `git add` cannot quietly publish one.
+third_party/asiosdk/
+third_party/ASIOSDK*/
+third_party/vst3sdk/
+third_party/VST_SDK/
+
+maintainer/
+
+# Local notes and scratch work.
+notes/
+scratch/
+*.local
+*.local.*
+
+# Benchmark output
+bench-*.json
+*.bench.json
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cache/
+compile_commands.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

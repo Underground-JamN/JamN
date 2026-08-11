@@ -1,0 +1,148 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 1
+  },
+  "configurePresets": [
+    {
+      "name": "linux-ninja",
+      "displayName": "Linux (Ninja, full build)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "JAMN_CORE_ONLY": "OFF",
+        "FETCHCONTENT_SOURCE_DIR_CATCH2": "${sourceDir}/deps-cache/catch2-src",
+        "FETCHCONTENT_SOURCE_DIR_ENET": "${sourceDir}/deps-cache/enet-src",
+        "FETCHCONTENT_SOURCE_DIR_JUCE": "${sourceDir}/deps-cache/juce-src"
+      }
+    },
+    {
+      "name": "core-only",
+      "displayName": "JUCE-free, network-free modules only",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-core-only",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "JAMN_CORE_ONLY": "ON",
+        "FETCHCONTENT_SOURCE_DIR_CATCH2": "${sourceDir}/deps-cache/catch2-src",
+        "FETCHCONTENT_SOURCE_DIR_ENET": "${sourceDir}/deps-cache/enet-src",
+        "FETCHCONTENT_SOURCE_DIR_JUCE": "${sourceDir}/deps-cache/juce-src"
+      }
+    },
+    {
+      "name": "windows-msvc",
+      "displayName": "Windows (MSVC via Ninja)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-windows-msvc",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "JAMN_CORE_ONLY": "OFF",
+        "FETCHCONTENT_SOURCE_DIR_CATCH2": "${sourceDir}/deps-cache/catch2-src",
+        "FETCHCONTENT_SOURCE_DIR_ENET": "${sourceDir}/deps-cache/enet-src",
+        "FETCHCONTENT_SOURCE_DIR_JUCE": "${sourceDir}/deps-cache/juce-src"
+      }
+    },
+    {
+      "name": "linux-asan",
+      "displayName": "Linux (Ninja, core-only, ASan+UBSan)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-asan",
+      "condition": {
+        "type": "notEquals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "JAMN_CORE_ONLY": "ON",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1",
+        "CMAKE_C_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined",
+        "FETCHCONTENT_SOURCE_DIR_CATCH2": "${sourceDir}/deps-cache/catch2-src",
+        "FETCHCONTENT_SOURCE_DIR_ENET": "${sourceDir}/deps-cache/enet-src",
+        "FETCHCONTENT_SOURCE_DIR_JUCE": "${sourceDir}/deps-cache/juce-src"
+      }
+    },
+    {
+      "name": "linux-tsan",
+      "displayName": "Linux (Ninja, core-only, TSan)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-tsan",
+      "condition": {
+        "type": "notEquals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "JAMN_CORE_ONLY": "ON",
+        "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer -g -O1",
+        "CMAKE_C_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer -g -O1",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread",
+        "FETCHCONTENT_SOURCE_DIR_CATCH2": "${sourceDir}/deps-cache/catch2-src",
+        "FETCHCONTENT_SOURCE_DIR_ENET": "${sourceDir}/deps-cache/enet-src",
+        "FETCHCONTENT_SOURCE_DIR_JUCE": "${sourceDir}/deps-cache/juce-src"
+      }
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "linux-ninja",
+      "configurePreset": "linux-ninja",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "core-only",
+      "configurePreset": "core-only",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-msvc",
+      "configurePreset": "windows-msvc",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-asan",
+      "configurePreset": "linux-asan",
+      "condition": {
+        "type": "notEquals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-tsan",
+      "configurePreset": "linux-tsan",
+      "condition": {
+        "type": "notEquals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}
