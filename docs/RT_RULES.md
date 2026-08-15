@@ -78,8 +78,10 @@ audio thread itself.
 
 Because `jamn_dsp` is JUCE-free and is driven by `FileAudioDevice` in
 its tests, this guard runs over the real signal path - `JamAudio`
-draining its trigger ring, `BlipVoice::Render`, `MasterBus::Process` -
-every time `ctest -L fast` runs, with no audio hardware required.
+draining its trigger ring, `BlipVoice::Render`,
+`TestToneInstrument::Render`, `PeerMixer::Render` and the
+`Strip::Render` calls under it, `MasterBus::Process` - every time
+`ctest -L fast` runs, with no audio hardware required.
 
 ## The `std::function` carve-out
 
@@ -123,6 +125,20 @@ invokes it), so C++'s reverse-declaration-order destruction closes
 `device_` - and with it, any in-flight callback - before `audio_` is
 torn down. Reordering those two member declarations would silently
 reopen a use-after-destruction window.
+
+The same rule now binds a second, longer chain, because the net thread
+is real: `NetThread` calls `PeerRuntime::Service` with no null check,
+and `PeerRuntime` holds a reference to its `ITransport`. So
+`JamnApplication` declares `transport_`, then `runtime_`, then `net_`,
+and destruction unwinds them in that reverse order. Declaration order
+is the backstop rather than the mechanism here: `shutdown()` resets all
+three explicitly, in that order, because `NetThread::Stop()` **joins**,
+and a join is the only thing that proves no thread is still inside
+`Service`. A signal without a join would satisfy the declaration order
+and still leave a live thread holding a destroyed reference.
+
+The two chains are independent today - they meet only once the audio
+callback starts draining `NoteCrossing`, which is not wired yet.
 
 See `docs/MODULE_OWNERSHIP.md` for which modules these rules bind
 (the six JUCE-free ones) and `docs/ARCHITECTURE.md` for the full

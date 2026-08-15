@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 # C is enabled here, not just CXX, because ENet (fetched below) is a C
 # project; enabling C for the first time from a FetchContent subdirectory
 # instead of the top-level project() call breaks Ninja's generate step.
-project(JamN VERSION 0.1 LANGUAGES CXX C)
+project(JamN VERSION 0.2 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,7 +34,7 @@ add_subdirectory(modules/jamn_dsp)
 add_subdirectory(modules/jamn_engine)
 add_subdirectory(modules/jamn_session)
 
-# jamn_bench only needs jamn_core (FileAudioDevice) so far, not JUCE - keep
+# jamn_bench only needs jamn_core and jamn_engine so far, not JUCE - keep
 # it building under core-only too until it grows a real jamn_platform
 # backend.
 add_subdirectory(tools/jamn_bench)
@@ -47,6 +47,14 @@ if(NOT JAMN_CORE_ONLY)
         GIT_SHALLOW    OFF
     )
     FetchContent_MakeAvailable(ENet)
+
+    # ENet exports no usable include path of its own: its CMakeLists.txt
+    # uses a directory-scoped include_directories() with no
+    # target_include_directories and no ALIAS target, so linking `enet`
+    # alone would not resolve #include <enet/enet.h>. Attach it here rather
+    # than hardcoding the path inside jamn_net, so the fetch stays the one
+    # place that knows where ENet's source landed.
+    target_include_directories(enet INTERFACE ${enet_SOURCE_DIR}/include)
 
     FetchContent_Declare(
         JUCE

@@ -4,6 +4,9 @@ add_library(jamn_dsp STATIC
     src/master_bus.cpp
     src/blip_voice.cpp
     src/jam_audio.cpp
+    src/test_tone_instrument.cpp
+    src/strip.cpp
+    src/peer_mixer.cpp
 )
 target_include_directories(jamn_dsp PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -20,6 +23,9 @@ if(BUILD_TESTING)
         tests/master_bus_tests.cpp
         tests/blip_voice_tests.cpp
         tests/jam_audio_tests.cpp
+        tests/test_tone_instrument_tests.cpp
+        tests/strip_tests.cpp
+        tests/peer_mixer_tests.cpp
     )
     target_link_libraries(jamn_dsp_tests PRIVATE
         jamn_dsp

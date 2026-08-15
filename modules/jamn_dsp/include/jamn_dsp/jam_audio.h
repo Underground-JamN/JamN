@@ -5,6 +5,7 @@
 #include "jamn_core/spsc_ring.h"
 #include "jamn_dsp/blip_voice.h"
 #include "jamn_dsp/master_bus.h"
+#include "jamn_dsp/peer_mixer.h"
 
 namespace jamn::dsp {
 
@@ -15,11 +16,14 @@ enum class TriggerEvent : std::uint8_t { kBlip };
 // never two callers of Trigger() from different threads.
 using TriggerRing = jamn::core::SpscRing<TriggerEvent, 16>;
 
-// The whole Phase 0 signal path, fixed at compile time: one voice into one
-// master gain. This is deliberately NOT a graph and must not grow into one
-// (AGENTS.md: "a PR that adds a graph node type is a warning sign"). Tests
-// and jamn_app both drive this same object, through jamn::core::AudioCallback
-// - so a passing test proves something about what actually ships.
+// The whole signal path, fixed at compile time: one local voice plus a
+// PeerMixer's fixed array of peer strips, into one master gain. This is
+// deliberately NOT a graph and must not grow into one (AGENTS.md: "a PR
+// that adds a graph node type is a warning sign") - the strips are a fixed
+// array, and a peer joining repoints a slot rather than adding a node.
+// Tests and jamn_app both drive this same object, through
+// jamn::core::AudioCallback - so a passing test proves something about
+// what actually ships.
 class JamAudio {
 public:
     // Message thread.
@@ -32,12 +36,20 @@ public:
     void SetGain(float linearGain) noexcept;
     float gain() const noexcept;
 
+    // Message thread. Where a peer's instrument, volume, mute and solo are
+    // set. BlipVoice stays outside the mixer deliberately: it is the local
+    // "prove the device works" blip, not a peer, and giving it a strip
+    // would make the local test tone mutable by another peer's solo.
+    PeerMixer& peers() noexcept;
+    const PeerMixer& peers() const noexcept;
+
     // Audio thread. Matches jamn::core::AudioCallback's shape exactly.
     void Process(float* const* outputChannels, int numChannels, int numFrames) noexcept;
 
 private:
     TriggerRing triggers_;
     BlipVoice voice_;
+    PeerMixer peerMixer_;
     MasterBus masterBus_;
 };
 

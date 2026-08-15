@@ -24,6 +24,10 @@ if(BUILD_TESTING)
         tests/spsc_ring_tests.cpp
         tests/realtime_scope_tests.cpp
         tests/file_audio_device_tests.cpp
+        tests/time_types_tests.cpp
+        tests/clock_tests.cpp
+        tests/byte_reader_writer_tests.cpp
+        tests/histogram64_tests.cpp
     )
     target_link_libraries(jamn_core_tests PRIVATE jamn_core jamn_core_rt_alloc_guard Catch2::Catch2WithMain)
     catch_discover_tests(jamn_core_tests PROPERTIES LABELS "fast")

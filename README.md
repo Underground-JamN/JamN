@@ -39,6 +39,16 @@ LAUNCH_JamN_windows.bat        # Windows
 Runs the binary already built above. Pass `--headless` to exercise the audio
 path with no window.
 
+To actually play with someone, one side hosts and the other joins:
+
+```bash
+./LAUNCH_JamN_linuxmac.sh --listen 7777          # host a session
+./LAUNCH_JamN_linuxmac.sh --connect host:7777    # join one
+```
+
+Pass `--list-devices` to see the available audio outputs and `--device
+<name>` to pick one - useful when running two instances on the same box.
+
 ## Everything else
 
 - **Contributing:** [`AGENTS.md`](AGENTS.md) is the single, complete

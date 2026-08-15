@@ -45,6 +45,10 @@ echo == module boundary check ==
 python tools\check_module_boundaries.py
 if errorlevel 1 goto :fail
 
+echo == protocol doc check ==
+python tools\check_protocol_doc.py
+if errorlevel 1 goto :fail
+
 echo == core-only: configure ==
 cmake --preset core-only
 if errorlevel 1 goto :fail
@@ -67,6 +71,12 @@ if errorlevel 1 goto :fail
 
 echo == windows-msvc: test app (JUCE-linked, e.g. jamn_app_smoke) ==
 ctest --preset windows-msvc -L app
+if errorlevel 1 goto :fail
+
+rem Real sockets on 127.0.0.1, so these can only run in the full build - the
+rem core-only preset never fetches ENet, and this label must not exist there.
+echo == windows-msvc: test net (real sockets, e.g. jamn_net_enet_tests) ==
+ctest --preset windows-msvc -L net
 if errorlevel 1 goto :fail
 
 echo.

@@ -14,6 +14,9 @@ cd "$(dirname "$0")"
 echo "== module boundary check =="
 python3 tools/check_module_boundaries.py
 
+echo "== protocol doc check =="
+python3 tools/check_protocol_doc.py
+
 echo "== core-only: configure =="
 cmake --preset core-only
 echo "== core-only: build =="
@@ -30,6 +33,11 @@ ctest --preset linux-ninja -L fast
 
 echo "== linux-ninja: test app (JUCE-linked, e.g. jamn_app_smoke) =="
 ctest --preset linux-ninja -L app
+
+# Real sockets on 127.0.0.1, so these can only run in the full build - the
+# core-only preset never fetches ENet, and this label must not exist there.
+echo "== linux-ninja: test net (real sockets, e.g. jamn_net_enet_tests) =="
+ctest --preset linux-ninja -L net
 
 echo
 echo "All checks passed."

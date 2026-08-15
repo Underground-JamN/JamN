@@ -4,6 +4,7 @@ namespace jamn::dsp {
 
 void JamAudio::Prepare(double sampleRate) noexcept {
     voice_.Prepare(sampleRate);
+    peerMixer_.Prepare(sampleRate);
     masterBus_.Prepare(sampleRate);
 }
 
@@ -17,6 +18,14 @@ void JamAudio::SetGain(float linearGain) noexcept {
 
 float JamAudio::gain() const noexcept {
     return masterBus_.gain();
+}
+
+PeerMixer& JamAudio::peers() noexcept {
+    return peerMixer_;
+}
+
+const PeerMixer& JamAudio::peers() const noexcept {
+    return peerMixer_;
 }
 
 void JamAudio::Process(float* const* outputChannels, int numChannels, int numFrames) noexcept {
@@ -33,6 +42,7 @@ void JamAudio::Process(float* const* outputChannels, int numChannels, int numFra
     }
 
     voice_.Render(outputChannels, numChannels, numFrames);
+    peerMixer_.Render(outputChannels, numChannels, numFrames);
     masterBus_.Process(outputChannels, numChannels, numFrames);
 }
 

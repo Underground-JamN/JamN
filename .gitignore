@@ -40,9 +40,19 @@ scratch/
 *.local
 *.local.*
 
-# Benchmark output
+# Benchmark output. Attached to a PR description, never committed - so the
+# plain bench.json that TODO.md's own acceptance step tells you to produce
+# (`jamn_bench > bench.json`) has to be here too, not just the patterned
+# names; it was the one filename the docs name and the list missed.
+bench.json
 bench-*.json
 *.bench.json
+
+# Claude Code harness state, not project content. maintainer/'s own
+# .gitignore has carried this same entry (with a comment claiming this file
+# already had it) since before this repo's first push - it didn't, until now.
+.claude/
+.mcp.json
 
 # Editors and IDEs
 .vscode/

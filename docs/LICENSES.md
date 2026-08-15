@@ -100,7 +100,7 @@ deferred work, not currently scheduled.
 
 | Dependency | License | Notes |
 | --- | --- | --- |
-| ENet v1.3.18 | MIT | SHA-pinned in `CMakeLists.txt` |
+| ENet v1.3.18 | MIT | see `third_party/enet/PROVENANCE.md` |
 | Opus 1.6.1 | BSD-3-Clause | reused from `~/source/openmpt/include/` |
 | r8brain | MIT | reused from `~/source/openmpt/include/` |
 | Catch2 | BSL-1.0 | test framework only, not distributed with the app |

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """jamn_core, jamn_proto, jamn_net, jamn_dsp, jamn_engine and jamn_session
 must never include JUCE (see AGENTS.md). Python, not bash/PowerShell, so the
-same check runs unchanged from build_and_test_linux.sh and
+same check runs unchanged from build_and_test_linuxmac.sh and
 build_and_test_windows.bat.
 """
 

@@ -5,12 +5,15 @@
 #include <stdexcept>
 #include <vector>
 
+#include <cstdint>
+
 #include "jamn_core/file_audio_device.h"
 #include "jamn_core/realtime_scope.h"
 #include "jamn_dsp/jam_audio.h"
 
 using jamn::core::FileAudioDevice;
 using jamn::core::SetRealtimeViolationHandler;
+using jamn::dsp::IInstrument;
 using jamn::dsp::JamAudio;
 
 namespace {
@@ -22,6 +25,25 @@ float PeakAbs(const std::vector<float>& buffer) {
     }
     return peak;
 }
+
+// See strip_tests.cpp: DC rather than a tone, so a rendered value is the
+// gain that produced it.
+class ConstantInstrument final : public IInstrument {
+public:
+    void Prepare(double) noexcept override {}
+    void NoteOn(std::uint8_t, std::uint8_t) noexcept override {}
+    void NoteOff(std::uint8_t) noexcept override {}
+    void AllNotesOff() noexcept override {}
+    int ActiveVoiceCount() const noexcept override { return 1; }
+
+    void Render(float* const* outputChannels, int numChannels, int numFrames) noexcept override {
+        for (int channel = 0; channel < numChannels; ++channel) {
+            for (int frame = 0; frame < numFrames; ++frame) {
+                outputChannels[channel][frame] += 1.0f;
+            }
+        }
+    }
+};
 
 }  // namespace
 
@@ -94,6 +116,56 @@ TEST_CASE("JamAudio's master gain scales what it renders", "[dsp][jam_audio][fas
     REQUIRE(quietPeak > 0.0f);
     REQUIRE(loudPeak > 0.0f);
     REQUIRE(quietPeak < loudPeak);
+}
+
+TEST_CASE("JamAudio's peer mixer reaches the output through the master gain",
+          "[dsp][jam_audio][fast]") {
+    ConstantInstrument instrument;
+    JamAudio audio;
+    audio.peers().strip(0).SetInstrument(&instrument);
+    audio.SetGain(0.5f);
+    audio.Prepare(48000.0);
+
+    const int numFrames = 128;
+    std::vector<float> channel(numFrames, 0.0f);
+    float* channels[] = {channel.data()};
+    audio.Process(channels, 1, numFrames);
+
+    // Both ramps snapped at Prepare, so this is exactly one strip at unity
+    // through a master gain of 0.5 - not an inequality that would still
+    // pass if the mixer were summing at the wrong point in the chain.
+    REQUIRE(channel.front() == 0.5f);
+}
+
+TEST_CASE("JamAudio's blip is not mutable by a peer's solo", "[dsp][jam_audio][fast]") {
+    const int numFrames = 128;
+
+    // Master gain well below full scale on purpose. A soloed peer at unity
+    // already sits exactly at the ceiling, so at unity gain the limiter
+    // would hold blip-plus-peer down to the same 1.0 the peer reaches
+    // alone, and the comparison below could not tell the blip apart from
+    // silence. This asks the question underneath the limiter, not through
+    // it.
+    auto peakOf = [numFrames](bool trigger) {
+        ConstantInstrument instrument;
+        JamAudio audio;
+        audio.peers().strip(0).SetInstrument(&instrument);
+        audio.peers().strip(0).SetSolo(true);
+        audio.SetGain(0.25f);
+        audio.Prepare(48000.0);
+        if (trigger) {
+            REQUIRE(audio.Trigger());
+        }
+
+        std::vector<float> channel(numFrames, 0.0f);
+        float* channels[] = {channel.data()};
+        audio.Process(channels, 1, numFrames);
+        return PeakAbs(channel);
+    };
+
+    // The local blip lives outside the mixer, so a peer soloing themselves
+    // must not silence it - see the comment on JamAudio::peers().
+    REQUIRE(peakOf(true) > peakOf(false));
 }
 
 TEST_CASE("JamAudio's real-time guard is actually armed in this binary", "[dsp][jam_audio][fast]") {
