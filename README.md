@@ -25,15 +25,15 @@ python3 scripts/bootstrap.py
 Build and run every check:
 
 ```bash
-./build_and_test_linuxmac.sh   # Linux/macOS
-build_and_test_windows.bat     # Windows
+./build_and_test_linuxmac.sh   # Linux/macOS (macOS untested)
+build_and_test_windows.bat     # Windows (untested)
 ```
 
 ## Quick usage
 
 ```bash
-./LAUNCH_JamN_linuxmac.sh      # Linux/macOS
-LAUNCH_JamN_windows.bat        # Windows
+./LAUNCH_JamN_linuxmac.sh      # Linux/macOS (macOS untested)
+LAUNCH_JamN_windows.bat        # Windows (untested)
 ```
 
 Runs the binary already built above. Pass `--headless` to exercise the audio
