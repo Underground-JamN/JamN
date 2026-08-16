@@ -36,7 +36,7 @@ bool EventScheduler::SetResolver(IDeadlineResolver* resolver) {
 
 bool EventScheduler::PushHeap(std::int64_t deadlineUs, jamn::net::PeerId peer, const jamn::proto::NoteEvent& event) {
     if (heapSize_ >= kMaxScheduledEvents) return false;
-    heap_[heapSize_] = HeapEntry{deadlineUs, peer, event};
+    heap_[heapSize_] = HeapEntry{deadlineUs, nextSequence_++, peer, event};
     ++heapSize_;
     std::push_heap(heap_.begin(), heap_.begin() + heapSize_, HeapCompare);
     return true;
@@ -123,6 +123,15 @@ void EventScheduler::ReleaseDueHeldEvents(std::int64_t nowUs) {
         // forever."
         PushHeap(nowUs, h.peer, h.event);
     }
+}
+
+std::size_t EventScheduler::FlushAll() {
+    std::size_t discarded = heapSize_ + heldCount_;
+    heapSize_ = 0;
+    for (auto& h : held_) h.inUse = false;
+    heldCount_ = 0;
+    // nextSequence_ deliberately not reset - see its declaration.
+    return discarded;
 }
 
 std::size_t EventScheduler::FlushPeer(jamn::net::PeerId peer) {

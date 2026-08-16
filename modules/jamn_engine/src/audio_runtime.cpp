@@ -18,7 +18,20 @@ void AudioRuntime::Prepare(double sampleRate, int blockFrames) {
     }
 }
 
-std::size_t AudioRuntime::Service(PeerRuntime& runtime, std::int64_t cumulativeSamples, std::int64_t steadyNs,
+bool AudioRuntime::SubmitLocalNote(const jamn::proto::NoteEvent& event) {
+    if (localMonitor_.Push(event)) return true;
+
+    // Relaxed: this counter orders nothing and guards nothing, same as
+    // NoteCrossing's.
+    localNotesDropped_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+}
+
+void AudioRuntime::RequestPanic() {
+    panicRequested_.store(true, std::memory_order_release);
+}
+
+std::size_t AudioRuntime::Service(PeerRuntime* runtime, std::int64_t cumulativeSamples, std::int64_t steadyNs,
                                    Note* out, std::size_t capacity) {
     // One reading of "now" for the whole block. Taking it again partway
     // through would make two events in the same block resolve against
@@ -28,7 +41,21 @@ std::size_t AudioRuntime::Service(PeerRuntime& runtime, std::int64_t cumulativeS
 
     clock_.Update(jamn::core::SampleTime(cumulativeSamples), steadyNs);
 
-    NoteCrossing& crossing = runtime.crossing();
+    // The player's own notes, before anything remote and with no
+    // conversion, no jitter buffer and no deadline arithmetic between
+    // them and the scheduler: they are due now, by definition
+    // (docs/CLOCK.md's "One scheduler, two resolvers", non-negotiable).
+    // The heap orders what actually comes out, so going first here costs a
+    // remote note nothing.
+    jamn::proto::NoteEvent localEvent;
+    for (std::size_t drained = 0; drained < kMaxLocalDrainPerBlock; ++drained) {
+        if (!localMonitor_.Pop(localEvent)) break;
+        if (scheduler_.ScheduleLocalEvent(localEvent, nowUs)) {
+            ++stats_.localNotesScheduled;
+        } else {
+            ++stats_.localNotesRejectedByScheduler;
+        }
+    }
 
     // Which slots need an all-notes-off emitted this block, and for whom.
     // Collected here and emitted below rather than pushed through the
@@ -39,12 +66,16 @@ std::size_t AudioRuntime::Service(PeerRuntime& runtime, std::int64_t cumulativeS
     std::array<jamn::net::PeerId, kMaxPeers> silence{};
     std::array<bool, kMaxPeers> needsSilence{};
 
-    for (std::size_t slot = 0; slot < kMaxPeers; ++slot) {
+    // Skipped entirely with no session, rather than run against an empty
+    // one: lastPeer_ and lastReLockGen_ would otherwise be advanced by
+    // blocks that saw nothing, and the block where a session finally
+    // starts would read as a departure on every slot.
+    for (std::size_t slot = 0; runtime != nullptr && slot < kMaxPeers; ++slot) {
         // Identity first: PeerRuntime's contract is that an offset read
         // from a slot whose peer has since changed means nothing, and this
         // is what says whether it changed.
-        const jamn::net::PeerId peer = runtime.PeerAt(slot);
-        const std::uint32_t generation = runtime.ReLockGeneration(slot);
+        const jamn::net::PeerId peer = runtime->PeerAt(slot);
+        const std::uint32_t generation = runtime->ReLockGeneration(slot);
 
         // A peer leaving costs exactly what a re-lock costs, and happens
         // far more often. Everything it had scheduled is meaningless now,
@@ -76,12 +107,12 @@ std::size_t AudioRuntime::Service(PeerRuntime& runtime, std::int64_t cumulativeS
             }
         }
 
-        const std::int64_t offsetUs = runtime.PublishedOffsetUs(slot);
-        const bool offsetLocked = runtime.OffsetIsLocked(slot);
+        const std::int64_t offsetUs = runtime->PublishedOffsetUs(slot);
+        const bool offsetLocked = runtime->OffsetIsLocked(slot);
 
         NoteCrossing::RemoteNote note;
         for (std::size_t drained = 0; drained < kMaxDrainPerPeerPerBlock; ++drained) {
-            if (!crossing.Consume(slot, note)) break;
+            if (!runtime->crossing().Consume(slot, note)) break;
 
             if (peer == PeerRuntime::kNoPeer || note.peer != peer) {
                 // The lane's tail outlived the link that filled it. Drop
@@ -108,6 +139,31 @@ std::size_t AudioRuntime::Service(PeerRuntime& runtime, std::int64_t cumulativeS
         }
     }
 
+    // Panic is handled after the drains, not before them: everything that
+    // arrived this block is in the queue by now, so flushing here catches
+    // it too. A note that outlived the panic by a few microseconds is the
+    // one thing a player who just pressed it cannot explain.
+    const bool panic = panicRequested_.exchange(false, std::memory_order_acquire);
+    if (panic) {
+        ++stats_.panicsServiced;
+        stats_.notesFlushedOnPanic += scheduler_.FlushAll();
+
+        // Anything the message thread pushed that this block did not get
+        // to goes as well - bounded by the ring's own capacity, so this
+        // cannot run long.
+        jamn::proto::NoteEvent stale;
+        while (localMonitor_.Pop(stale)) {
+        }
+
+        // Every slot, occupied or not. An instrument on a slot whose peer
+        // left can still be ringing, and that is precisely the sound a
+        // player is reaching for panic to stop.
+        for (std::size_t slot = 0; slot < kMaxPeers; ++slot) {
+            silence[slot] = runtime != nullptr ? runtime->PeerAt(slot) : PeerRuntime::kNoPeer;
+            needsSilence[slot] = true;
+        }
+    }
+
     const std::size_t limit = std::min(capacity, kMaxNotesPerBlock);
     std::size_t count = 0;
 
@@ -126,6 +182,18 @@ std::size_t AudioRuntime::Service(PeerRuntime& runtime, std::int64_t cumulativeS
         ++count;
     }
 
+    // The local monitor's own silence. It owns no slot, so it cannot ride
+    // the loop above - and it is the one a player notices most, being the
+    // sound their own hands are making.
+    if (panic && count < limit) {
+        out[count].peer = EventScheduler::kLocalPeerId;
+        out[count].slot = kMaxPeers;
+        out[count].event = jamn::proto::NoteEvent{};
+        out[count].event.kind = jamn::proto::NoteEventKind::kAllNotesOff;
+        out[count].sampleOffset = 0;
+        ++count;
+    }
+
     EventScheduler::Delivery delivery;
     // Bounded before the pop, never after: PopReady removes what it
     // returns, so discovering the array was full one note too late would
@@ -136,11 +204,20 @@ std::size_t AudioRuntime::Service(PeerRuntime& runtime, std::int64_t cumulativeS
         // block delivers a handful of notes, so a linear scan is cheaper
         // than the per-block reverse table it would take to avoid it -
         // and stays correct when a slot is re-claimed mid-block.
+        //
+        // **The local peer must not enter that scan.**
+        // EventScheduler::kLocalPeerId and PeerRuntime::kNoPeer are the
+        // same value, 0xFFFF - deliberately, since neither is ever a real
+        // link - so a local note would match the first *empty* slot and be
+        // handed to whichever strip that is. Local input owns no slot, and
+        // a caller tells it apart by its peer id, not by this field.
         out[count].slot = kMaxPeers;
-        for (std::size_t slot = 0; slot < kMaxPeers; ++slot) {
-            if (runtime.PeerAt(slot) == delivery.peer) {
-                out[count].slot = slot;
-                break;
+        if (runtime != nullptr && delivery.peer != EventScheduler::kLocalPeerId) {
+            for (std::size_t slot = 0; slot < kMaxPeers; ++slot) {
+                if (runtime->PeerAt(slot) == delivery.peer) {
+                    out[count].slot = slot;
+                    break;
+                }
             }
         }
         out[count].event = delivery.event;

@@ -35,19 +35,19 @@ stated in the PR.
 Prefer one task per module per PR. The module split is what lets two
 people work at once without colliding.
 
-## Status, as of Phase 0.5b T5.0
+## Status, as of Phase 0.5b T6.1 (local input; capture backends not built)
 
 | Module | Status | What actually exists |
 |---|---|---|
 | `jamn_core` | Real | `SpscRing`, `RealtimeScope`, `FileAudioDevice`, `AudioCallback`, time types, `IClock`/`SteadyClock`/`SimClock`, `ByteReader`/`ByteWriter`, `Histogram64`. No dependencies, links no JUCE. |
-| `jamn_dsp` | Real | `BlipVoice`, `MasterBus`, `JamAudio`, `IInstrument`/`TestToneInstrument`, `Strip`, `PeerMixer`, and the shared `gain_ramp.h`. `MasterBus` is gain plus a peak limiter (no lookahead - `docs/CLOCK.md` forbids delaying local monitoring - so a hard clamp guarantees the ceiling and the envelope keeps it from working continuously). Depends on `jamn_core` only. |
-| `jamn_platform` | Thin, real | `JuceAudioDevice` only. No WAV writer, no MIDI, no prefs, no keyboard/mouse input yet, despite the table above. |
-| `jamn_ui` | Thin, real | `JamWindowContent` only - one button, one slider. |
+| `jamn_dsp` | Real | `BlipVoice`, `MasterBus`, `JamAudio`, `IInstrument`/`TestToneInstrument`, `Strip`, `PeerMixer`, and the shared `gain_ramp.h`. `JamAudio` renders one borrowed local-monitor instrument outside `PeerMixer` entirely (`SetLocalInstrument`), for the same reason `BlipVoice` sits outside it and one more: a player must always hear themselves, and a strip carries a mute, a solo and a volume aimed at somebody else. `MasterBus` is gain plus a peak limiter (no lookahead - `docs/CLOCK.md` forbids delaying local monitoring - so a hard clamp guarantees the ceiling and the envelope keeps it from working continuously). Depends on `jamn_core` only. |
+| `jamn_platform` | Real | `JuceAudioDevice`, and `KeyNoteInput` - the computer keyboard's rollover (six keys), auto-repeat filtering and physical-position-to-pitch map. `KeyNoteInput` includes no JUCE and no OS types at all: the per-OS capture backends that would feed it raw key codes **do not exist yet**, so nothing presses its keys in a shipping build. No WAV writer, no MIDI, no prefs. |
+| `jamn_ui` | Real | `JamWindowContent` (one button, one slider) and `NoteKeyboard`, the on-screen piano - click to play, drag to glide, two octaves from C3. Still no `jamn_dsp` edge: both report what the user did through `std::function`s and nothing else. |
 | `jamn_app` | Real | `main()` and the wiring: `RunHeadless`, `MainWindow`, `JamnApplication`. `--listen <port>` / `--connect <host:port>` bring a session up; with `--headless` they run a bounded, self-scoring net session whose verdict is the exit code. Listening binds 127.0.0.1 only for now - widening it belongs with the join-by-`ip:port` dialog. |
 | `tools/jamn_bench` | Real, small | `BenchResult`, `ToJson`, `FromAudioBlockTiming`, and three backends (`file-audio-device`, `event-scheduler`, `loopback-clock`). Not a module under `modules/`, but follows the same JUCE-free rule by construction - it links `jamn_core` and `jamn_engine`. The schema lives in `jamn_bench_lib`, split from the executable so `jamn_app` can link it and emit the same rows from a real device (`--bench-json`) without any of it reaching the `core-only` preset. |
 | `jamn_proto` | Real | `PacketHeader`, TLV framing, `MessageType`, `NoteEvent`/`NoteBurst`/`Hello`/`SessionConfig`/`InstrumentAssign`, golden vectors, a fuzz-replay corpus, join authentication (`ConstantTimeEquals`, `DecodePacketAuthenticated`). Depends on `jamn_core` only - no ENet, no JUCE. |
 | `jamn_net` | Real | `ITransport`, `SimTransport`, `EnetTransport` (one real UDP socket, `docs/PROTOCOL.md`'s channel table mapped onto ENet's packet flags). Depends on `jamn_core` and ENet. |
-| `jamn_engine` | Real (except `TempoMap`) | `ClockSync`, `JitterBuffer`, `EventScheduler` (+ `IDeadlineResolver`/`LiveResolver`/`MusicalResolver`), `BurstAssembler`, `DedupeRing`, and `PeerRuntime` - the production owner of the net thread (transport poll loop, clock ping cadence and pong replies, burst assembly and broadcast, receive -> dedupe -> hand off). `PeerRuntime` is session-agnostic: it hands control-channel packets out whole through a callback rather than linking `jamn_session`, which is what keeps that edge absent in both directions. `NoteCrossing` is the single exit for a received note - one `SpscRing` lane per peer slot, published by the net thread and drained by the audio thread, reusing the one sanctioned lock-free primitive rather than introducing a new one (so no ADR, per `docs/RT_RULES.md`). `NetThread` is the thread itself: it drives `Service` on an absolute 250us schedule (`docs/CLOCK.md` says why that number), joins on `Stop()`, and reports the interval it achieved rather than the one it requested. It lives here rather than in `jamn_app` so `ctest -L fast` and both sanitizer presets - all core-only scope - can see it. `AudioClock` is Clock 2 - a second-order DLL measuring the device's real sample rate against the steady clock, built and unit-tested but never yet fed by a real device. `AudioRuntime` is the audio thread's counterpart to `PeerRuntime`: one `Service` call at block start drives `AudioClock`, drains every `NoteCrossing` lane, converts each note out of its sender's timebase, schedules it, and hands back what is due. It stops at data rather than making sound, so that no `jamn_dsp` edge is needed in either direction - `jamn_app` links both and does the instrument calls. `TempoMap` is later-phase scope with nothing to build against yet. Depends on `jamn_core`, `jamn_proto`, `jamn_net`, and `Threads::Threads`. |
+| `jamn_engine` | Real (except `TempoMap`) | `ClockSync`, `JitterBuffer`, `EventScheduler` (+ `IDeadlineResolver`/`LiveResolver`/`MusicalResolver`), `BurstAssembler`, `DedupeRing`, and `PeerRuntime` - the production owner of the net thread (transport poll loop, clock ping cadence and pong replies, burst assembly and broadcast, receive -> dedupe -> hand off). `PeerRuntime` is session-agnostic: it hands control-channel packets out whole through a callback rather than linking `jamn_session`, which is what keeps that edge absent in both directions. `NoteCrossing` is the single exit for a received note - one `SpscRing` lane per peer slot, published by the net thread and drained by the audio thread, reusing the one sanctioned lock-free primitive rather than introducing a new one (so no ADR, per `docs/RT_RULES.md`). `NetThread` is the thread itself: it drives `Service` on an absolute 250us schedule (`docs/CLOCK.md` says why that number), joins on `Stop()`, and reports the interval it achieved rather than the one it requested. It lives here rather than in `jamn_app` so `ctest -L fast` and both sanitizer presets - all core-only scope - can see it. `AudioClock` is Clock 2 - a second-order DLL measuring the device's real sample rate against the steady clock, unit-tested and since confirmed against real hardware. `AudioRuntime` is the audio thread's counterpart to `PeerRuntime`: one `Service` call at block start drives `AudioClock`, drains every `NoteCrossing` lane, converts each note out of its sender's timebase, schedules it, and hands back what is due. It also owns local input: a second `SpscRing` the message thread pushes a player's own notes onto, drained at block start and scheduled at zero added delay, which is why `Service` takes a `PeerRuntime*` that may be null - a solo player has no session, and monitoring must not depend on one. It stops at data rather than making sound, so that no `jamn_dsp` edge is needed in either direction - `jamn_app` links both and does the instrument calls. `TempoMap` is later-phase scope with nothing to build against yet. Depends on `jamn_core`, `jamn_proto`, `jamn_net`, and `Threads::Threads`. |
 | `jamn_session` | Real | `Roster` (fixed-capacity, per-peer handshaking -> joined -> leaving state machine) and `SessionHost` (join authority: constant-time passphrase comparison, `proto_major` refused, `proto_minor` negotiated down). `SessionHost` deliberately does not install itself as the transport's callback - it exposes `HandlePeerEvent`/`HandleControlPacket` for the caller to drive, so T4.1's runtime stays the single owner of those callbacks. Depends on `jamn_net`, `jamn_proto`. |
 
 A stub module is `add_library(<name> INTERFACE)` plus an include
@@ -114,12 +114,21 @@ their first step.
 `jamn_core`, `jamn_proto`, `jamn_net`, `jamn_dsp` and `jamn_engine`
 each have their own Catch2 test binary (`jamn_core_tests`,
 `jamn_proto_tests`, `jamn_net_tests`, `jamn_dsp_tests`,
-`jamn_engine_tests`, all labelled `fast`). `jamn_platform` and
-`jamn_ui` have **no test target of their own** - they are exercised
-only transitively, through `jamn_app_smoke` (labelled `app`, links
-JUCE). `jamn_session` has its own `jamn_session_tests` too, also
-`fast`; `jamn_net`'s ENet-linking cases are a separate binary under
-the `net` label, since `fast` must be identical under `core-only`.
+`jamn_engine_tests`, all labelled `fast`). `jamn_session` has its own
+`jamn_session_tests` too, also `fast`; `jamn_net`'s ENet-linking cases
+are a separate binary under the `net` label, since `fast` must be
+identical under `core-only`.
+
+`jamn_platform` and `jamn_ui` gained their first test binaries with
+T6.1 (`jamn_platform_tests`, `jamn_ui_tests`), both labelled `app`
+rather than `fast` - **the label follows the module, not the code
+under test.** Neither subject includes any JUCE (`KeyNoteInput` takes a
+raw code and a bool; `PitchAtPoint` takes ints), but the binaries link
+modules that do, and `fast` must hold the same list under `core-only`,
+where neither module is even built. What those tests cannot reach is
+everything JUCE owns: that a key press arrives at all, that a mouse
+press reaches `mouseDown`, or that any of it looks right. Those stay
+maintainer checks at a real desktop.
 
 Two `net` cases are not Catch2 binaries at all. `jamn_loopback_peer`
 plus `run_two_process_loopback.py` (both under

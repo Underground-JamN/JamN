@@ -32,6 +32,32 @@ content, link the doc instead of summarizing it.
 
 ## [Unreleased]
 
+## [0.3] - 2026-08-16
+
+### Added
+
+- A player now hears their own notes. Local input is scheduled at zero
+  added delay (`docs/CLOCK.md`, non-negotiable) and rendered through its
+  own instrument outside `PeerMixer`, so no peer's mute, solo or volume
+  can silence a player to themselves. The window's button plays through
+  that path, and works with no session at all.
+- An on-screen piano in the window: click a key to play it, drag across
+  the keys to glide. Two octaves from C3, and its notes go to peers and
+  to local monitoring by the same route a typed note will.
+- A Panic button, also bound to Escape: discards everything queued and
+  silences every instrument, local and per-peer, at the next audio
+  block. One-shot, not a mute - notes arriving after it play normally.
+  The key binding matters because with one mouse you cannot hold a note
+  and click the button at the same time.
+
+### Fixed
+
+- Notes could sound forever if several were played inside one audio
+  block - dragging fast across the on-screen piano was enough. Events
+  scheduled in one block share a deadline, and the scheduler's heap was
+  ordered on deadline alone, so a note-off could be delivered before its
+  own note-on. Ties now break on arrival order.
+
 ## [0.2] - 2026-08-15
 
 ### Added

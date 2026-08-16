@@ -1,12 +1,14 @@
 // T5.3: the audio thread's half of a session, driven end to end against
 // two real PeerRuntimes over SimTransport - no ENet, no audio device, no
-// JUCE, so these carry `fast` like the rest of the module.
+// JUCE, so these carry `fast` like the rest of the module. T6.1 added the
+// local-input cases at the end, which need no session and pass a null
+// runtime.
 //
 // Every TEST_CASE name here contains "audio_runtime", not only the tag.
 // `ctest -R` matches test names and never tags, and exits 0 on an empty
 // selection. The accept command is:
 //
-//     ctest --preset core-only -R 'audio_runtime'   -> 9 tests
+//     ctest --preset core-only -R 'audio_runtime'   -> 16 tests
 //
 // What these cannot cover is the last hop: turning a returned Note into
 // sound needs jamn_dsp, which this module has no edge to on purpose. That
@@ -100,7 +102,7 @@ struct AudioSide {
 
     std::size_t Block(PeerRuntime& runtime, std::vector<AudioRuntime::Note>& into) {
         std::array<AudioRuntime::Note, AudioRuntime::kMaxNotesPerBlock> buffer;
-        const std::size_t count = audio.Service(runtime, frames, steadyNs, buffer.data(), buffer.size());
+        const std::size_t count = audio.Service(&runtime, frames, steadyNs, buffer.data(), buffer.size());
         for (std::size_t index = 0; index < count; ++index) into.push_back(buffer[index]);
         frames += kBlockFrames;
         steadyNs += kBlockNs;
@@ -310,7 +312,7 @@ TEST_CASE("audio_runtime never returns more notes than the block has room for", 
     std::size_t total = 0;
     std::size_t maxInOneBlock = 0;
     for (int block = 0; block < 200; ++block) {
-        const std::size_t count = side.audio.Service(nodes.a, side.frames, side.steadyNs, small.data(), small.size());
+        const std::size_t count = side.audio.Service(&nodes.a, side.frames, side.steadyNs, small.data(), small.size());
         REQUIRE(count <= kSmallCapacity);
         maxInOneBlock = std::max(maxInOneBlock, count);
         total += count;
@@ -433,10 +435,213 @@ TEST_CASE("audio_runtime is safe to service from a realtime scope", "[audio_runt
         // the per-block path and is what has to hold under the trap.
         jamn::core::RealtimeScope scope;
         for (int block = 0; block < 200; ++block) {
-            side.audio.Service(nodes.a, side.frames, side.steadyNs, buffer.data(), buffer.size());
+            side.audio.Service(&nodes.a, side.frames, side.steadyNs, buffer.data(), buffer.size());
             side.frames += kBlockFrames;
             side.steadyNs += kBlockNs;
         }
     }
     REQUIRE(side.audio.clock().UpdateCount() == 200);
+}
+
+// --- T6.1: local input. The accept criterion the plan states is
+// "the maintainer plays and confirms local notes sound immediately",
+// which no test can run - but the mechanism under the word "immediately"
+// is testable exactly, and is the part that could silently regress into
+// a block of added latency later.
+
+TEST_CASE("audio_runtime plays a local note in the same block it services", "[audio_runtime]") {
+    TwoNodes nodes(7);
+    AudioSide side;
+
+    REQUIRE(side.audio.SubmitLocalNote(NoteOn(60)));
+
+    std::array<AudioRuntime::Note, AudioRuntime::kMaxNotesPerBlock> buffer;
+    // One block. Not "eventually", not "the next one" - the whole content
+    // of "never delayed" is that this count is nonzero right here.
+    const std::size_t count = side.audio.Service(&nodes.a, side.frames, side.steadyNs, buffer.data(), buffer.size());
+
+    REQUIRE(count == 1);
+    REQUIRE(buffer[0].event.kind == NoteEventKind::kNoteOn);
+    REQUIRE(buffer[0].event.a == 60);
+    REQUIRE(buffer[0].peer == jamn::engine::EventScheduler::kLocalPeerId);
+    REQUIRE(side.audio.stats().localNotesScheduled == 1);
+    REQUIRE(side.audio.stats().localNotesRejectedByScheduler == 0);
+    REQUIRE(side.audio.LocalNotesDropped() == 0);
+}
+
+TEST_CASE("audio_runtime monitors local input with no session at all", "[audio_runtime]") {
+    // The solo path: a player who has not joined or hosted anything has no
+    // PeerRuntime, and nothing else in this suite passes null. Before
+    // T6.1 the caller returned early here and a solo player was silent.
+    AudioSide side;
+
+    REQUIRE(side.audio.SubmitLocalNote(NoteOn(64)));
+    REQUIRE(side.audio.SubmitLocalNote(NoteOff(64)));
+
+    std::array<AudioRuntime::Note, AudioRuntime::kMaxNotesPerBlock> buffer;
+    const std::size_t count = side.audio.Service(nullptr, side.frames, side.steadyNs, buffer.data(), buffer.size());
+
+    REQUIRE(count == 2);
+    REQUIRE(buffer[0].event.kind == NoteEventKind::kNoteOn);
+    REQUIRE(buffer[1].event.kind == NoteEventKind::kNoteOff);
+    // Clock 2 is still driven with no session: it measures this device's
+    // sample clock, which owes nothing to anyone being connected.
+    REQUIRE(side.audio.clock().UpdateCount() == 1);
+}
+
+TEST_CASE("audio_runtime never hands a local note a peer's slot", "[audio_runtime]") {
+    // EventScheduler::kLocalPeerId and PeerRuntime::kNoPeer are both
+    // 0xFFFF, so a reverse lookup by peer id matches the first *empty*
+    // slot - which would route the player's own note to whatever
+    // instrument is on that strip, and make it mutable by that strip's
+    // mute and solo. This is that regression, and it needs a runtime with
+    // at least one empty slot to be able to fire at all.
+    TwoNodes nodes(8);
+    AudioSide side;
+    nodes.RunUntil(200'000);
+
+    std::size_t emptySlots = 0;
+    for (std::size_t slot = 0; slot < PeerRuntime::kMaxPeers; ++slot) {
+        if (nodes.a.PeerAt(slot) == PeerRuntime::kNoPeer) ++emptySlots;
+    }
+    REQUIRE(emptySlots > 0);
+
+    REQUIRE(side.audio.SubmitLocalNote(NoteOn(72)));
+
+    std::array<AudioRuntime::Note, AudioRuntime::kMaxNotesPerBlock> buffer;
+    const std::size_t count = side.audio.Service(&nodes.a, side.frames, side.steadyNs, buffer.data(), buffer.size());
+
+    REQUIRE(count == 1);
+    REQUIRE(buffer[0].peer == jamn::engine::EventScheduler::kLocalPeerId);
+    REQUIRE(buffer[0].slot == AudioRuntime::kMaxPeers);
+}
+
+TEST_CASE("audio_runtime drops local input rather than blocking when the ring is full", "[audio_runtime]") {
+    AudioSide side;
+
+    // Nothing services in between, so the ring fills and the next push is
+    // refused. A refusal is the designed failure: backpressure toward the
+    // audio thread is not an option, so a bounded drop is what is left.
+    for (std::size_t index = 0; index < AudioRuntime::kLocalMonitorCapacity; ++index) {
+        REQUIRE(side.audio.SubmitLocalNote(NoteOn(60)));
+    }
+    REQUIRE_FALSE(side.audio.SubmitLocalNote(NoteOn(60)));
+    REQUIRE(side.audio.LocalNotesDropped() == 1);
+
+    // And the backlog drains over blocks rather than in one - bounded work
+    // per block is the other half of the same rule.
+    std::array<AudioRuntime::Note, AudioRuntime::kMaxNotesPerBlock> buffer;
+    const std::size_t first = side.audio.Service(nullptr, side.frames, side.steadyNs, buffer.data(), buffer.size());
+    REQUIRE(first == AudioRuntime::kMaxLocalDrainPerBlock);
+}
+
+TEST_CASE("audio_runtime services local input from a realtime scope", "[audio_runtime]") {
+    // Submitting is the message thread's and stays outside the trap; the
+    // drain and the schedule are the audio thread's and are what has to
+    // hold under it.
+    AudioSide side;
+    for (int index = 0; index < 8; ++index) {
+        side.audio.SubmitLocalNote(NoteOn(static_cast<std::uint8_t>(60 + index)));
+    }
+
+    std::array<AudioRuntime::Note, AudioRuntime::kMaxNotesPerBlock> buffer;
+    {
+        jamn::core::RealtimeScope scope;
+        for (int block = 0; block < 32; ++block) {
+            side.audio.Service(nullptr, side.frames, side.steadyNs, buffer.data(), buffer.size());
+            side.frames += kBlockFrames;
+            side.steadyNs += kBlockNs;
+        }
+    }
+    REQUIRE(side.audio.stats().localNotesScheduled == 8);
+}
+
+TEST_CASE("audio_runtime keeps a local note's on and off in the order they were played", "[audio_runtime]") {
+    // The dragged-mouse bug, reported at the machine 2026-08-16: holding
+    // the button and sweeping fast across the on-screen piano left notes
+    // sounding forever. A sweep puts several keys' on/off pairs inside
+    // one audio block, and every local event in a block is scheduled
+    // against that block's single `now` - so they all carry the same
+    // deadline, and a heap ordered on deadline alone is free to hand
+    // them back in any order. An off delivered before its own on is a
+    // note that never ends.
+    AudioSide side;
+
+    constexpr std::uint8_t kSweep[] = {60, 61, 62, 63, 64};
+    for (std::uint8_t pitch : kSweep) {
+        REQUIRE(side.audio.SubmitLocalNote(NoteOn(pitch)));
+        REQUIRE(side.audio.SubmitLocalNote(NoteOff(pitch)));
+    }
+
+    std::array<AudioRuntime::Note, AudioRuntime::kMaxNotesPerBlock> buffer;
+    const std::size_t count = side.audio.Service(nullptr, side.frames, side.steadyNs, buffer.data(), buffer.size());
+    REQUIRE(count == 2 * (sizeof(kSweep) / sizeof(kSweep[0])));
+
+    // Every pitch must be off by the end, and must never have been
+    // turned off before it was turned on.
+    std::array<int, 128> sounding{};
+    for (std::size_t index = 0; index < count; ++index) {
+        const AudioRuntime::Note& note = buffer[index];
+        if (note.event.kind == NoteEventKind::kNoteOn) {
+            ++sounding[note.event.a];
+        } else if (note.event.kind == NoteEventKind::kNoteOff) {
+            INFO("note-off for pitch " << static_cast<int>(note.event.a) << " arrived before its note-on");
+            REQUIRE(sounding[note.event.a] > 0);
+            --sounding[note.event.a];
+        }
+    }
+    for (std::size_t pitch = 0; pitch < sounding.size(); ++pitch) {
+        INFO("pitch " << pitch << " left sounding");
+        REQUIRE(sounding[pitch] == 0);
+    }
+}
+
+TEST_CASE("audio_runtime silences every instrument on a panic", "[audio_runtime]") {
+    // The escape hatch for a stuck note. Every slot gets an
+    // all-notes-off, occupied or not - an instrument on a slot whose peer
+    // left can still be ringing, which is exactly the sound being reached
+    // for - and so does the local monitor, which owns no slot.
+    TwoNodes nodes(9);
+    AudioSide side;
+    nodes.RunUntil(200'000);
+
+    REQUIRE(side.audio.SubmitLocalNote(NoteOn(60)));
+    side.audio.RequestPanic();
+
+    std::array<AudioRuntime::Note, AudioRuntime::kMaxNotesPerBlock> buffer;
+    const std::size_t count = side.audio.Service(&nodes.a, side.frames, side.steadyNs, buffer.data(), buffer.size());
+
+    std::size_t silencedSlots = 0;
+    bool silencedLocal = false;
+    for (std::size_t index = 0; index < count; ++index) {
+        if (buffer[index].event.kind != NoteEventKind::kAllNotesOff) continue;
+        if (buffer[index].slot < AudioRuntime::kMaxPeers) {
+            ++silencedSlots;
+        } else if (buffer[index].peer == jamn::engine::EventScheduler::kLocalPeerId) {
+            silencedLocal = true;
+        }
+    }
+    REQUIRE(silencedSlots == AudioRuntime::kMaxPeers);
+    REQUIRE(silencedLocal);
+    REQUIRE(side.audio.stats().panicsServiced == 1);
+
+    // And the note submitted just before it does not sound afterwards:
+    // panic runs after the drain, so an event that arrived in the same
+    // block is flushed with everything else rather than surviving by
+    // microseconds.
+    std::size_t noteOnsAfterPanic = 0;
+    for (std::size_t index = 0; index < count; ++index) {
+        if (buffer[index].event.kind == NoteEventKind::kNoteOn) ++noteOnsAfterPanic;
+    }
+    REQUIRE(noteOnsAfterPanic == 0);
+
+    // One panic, not a mute: the next note plays normally.
+    REQUIRE(side.frames == 0);
+    side.frames += kBlockFrames;
+    side.steadyNs += kBlockNs;
+    REQUIRE(side.audio.SubmitLocalNote(NoteOn(62)));
+    const std::size_t after = side.audio.Service(&nodes.a, side.frames, side.steadyNs, buffer.data(), buffer.size());
+    REQUIRE(after == 1);
+    REQUIRE(buffer[0].event.kind == NoteEventKind::kNoteOn);
+    REQUIRE(side.audio.stats().panicsServiced == 1);
 }

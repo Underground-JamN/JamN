@@ -20,6 +20,14 @@ float JamAudio::gain() const noexcept {
     return masterBus_.gain();
 }
 
+void JamAudio::SetLocalInstrument(IInstrument* instrument) noexcept {
+    localInstrument_.store(instrument, std::memory_order_release);
+}
+
+IInstrument* JamAudio::localInstrument() const noexcept {
+    return localInstrument_.load(std::memory_order_acquire);
+}
+
 PeerMixer& JamAudio::peers() noexcept {
     return peerMixer_;
 }
@@ -42,6 +50,12 @@ void JamAudio::Process(float* const* outputChannels, int numChannels, int numFra
     }
 
     voice_.Render(outputChannels, numChannels, numFrames);
+    // Adds into the buffer the same way BlipVoice does, and ahead of the
+    // mixer only because both are additive and the order cannot matter.
+    // One acquire load per block, not per frame.
+    if (IInstrument* local = localInstrument_.load(std::memory_order_acquire); local != nullptr) {
+        local->Render(outputChannels, numChannels, numFrames);
+    }
     peerMixer_.Render(outputChannels, numChannels, numFrames);
     masterBus_.Process(outputChannels, numChannels, numFrames);
 }

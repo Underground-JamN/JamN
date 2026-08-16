@@ -1,10 +1,12 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
 #include "jamn_core/session_limits.h"
+#include "jamn_core/spsc_ring.h"
 #include "jamn_engine/audio_clock.h"
 #include "jamn_engine/event_scheduler.h"
 #include "jamn_engine/peer_runtime.h"
@@ -31,10 +33,20 @@ namespace jamn::engine {
 // JUCE-linked module keeps only what it cannot delegate. What is left
 // there is a for-loop.
 //
-// Threading: every method is the audio thread, except Prepare. It reads
-// PeerRuntime's per-slot atomics, which the net thread publishes and never
-// expects back, and drains NoteCrossing, whose consumer side is this
-// thread by contract.
+// **It also carries local input, and that is why Service takes a runtime
+// that may be null.** A player's own notes are monitored live and never
+// delayed (docs/CLOCK.md's "One scheduler, two resolvers", non-negotiable),
+// so they do not travel through NoteCrossing, a jitter buffer, or any
+// timestamp conversion - SubmitLocalNote hands them straight to
+// ScheduleLocalEvent at zero added delay. That path owes nothing to a
+// session, and a player running solo has no PeerRuntime at all, so gating
+// it on one would make the app silent exactly when there is nobody else to
+// hear.
+//
+// Threading: every method is the audio thread, except Prepare and
+// SubmitLocalNote, which are the message thread. It reads PeerRuntime's
+// per-slot atomics, which the net thread publishes and never expects back,
+// and drains NoteCrossing, whose consumer side is this thread by contract.
 class AudioRuntime {
 public:
     static constexpr std::size_t kMaxPeers = jamn::core::kMaxPeers;
@@ -50,6 +62,16 @@ public:
     // single block can be made to do by a peer that flooded its lane while
     // the audio thread was stalled - the rest waits, it is not discarded.
     static constexpr std::size_t kMaxDrainPerPeerPerBlock = 32;
+
+    // The local-monitoring ring, sized on the same reasoning as
+    // NoteCrossing's lanes: a player emits under 100 events/s against an
+    // audio thread that drains every block, so reaching the end means the
+    // audio thread stopped, not that somebody played fast.
+    static constexpr std::size_t kLocalMonitorCapacity = 128;
+
+    // The same bound as kMaxDrainPerPeerPerBlock, for the same reason: one
+    // block's work stays bounded even if the ring filled during a stall.
+    static constexpr std::size_t kMaxLocalDrainPerBlock = 32;
 
     struct Note {
         jamn::net::PeerId peer = 0;
@@ -75,17 +97,51 @@ public:
     // because a device restart is a new sample timeline.
     void Prepare(double sampleRate, int blockFrames);
 
-    // Audio thread, at block start. cumulativeSamples is the index of this
-    // block's first frame and steadyNs is steady_clock at callback entry -
-    // the pair JuceAudioDevice::RecordBlock accumulates. Returns how many
-    // entries of `out` were filled.
+    // Message thread, and the single producer of the local-monitoring
+    // ring - keyboard capture and the mouse strip both funnel through one
+    // message-thread entry point in jamn_app before reaching here, which
+    // is what keeps this single-producer rather than needing a merge.
+    // Returns false when the ring is full: the note is dropped and
+    // counted, never blocked on, because backpressure toward a real-time
+    // consumer is not an option.
+    //
+    // Reuses jamn::core::SpscRing, the one sanctioned lock-free primitive,
+    // so no new primitive and no ADR (docs/RT_RULES.md) - the same
+    // reasoning NoteCrossing's header states for the remote case.
+    bool SubmitLocalNote(const jamn::proto::NoteEvent& event);
+
+    // Message thread. Silence everything, at the next block: the queue is
+    // discarded, whatever local input is still in the ring is thrown
+    // away, and an all-notes-off is emitted for every peer slot and for
+    // the local monitor. The escape hatch for a stuck note, whatever
+    // caused it - a lost note-off from a peer, a window that lost focus
+    // mid-chord, or a bug.
+    //
+    // Deliberately one-shot and not a mute: new notes arriving after it
+    // play normally. A player reaching for panic wants the sound that is
+    // happening to stop, not the session to end.
+    //
+    // Repeated calls before the next block collapse into one, which is
+    // what a flag rather than a counter buys - two panics in 3ms are one
+    // player hitting it twice, and there is nothing left to silence the
+    // second time.
+    void RequestPanic();
+
+    // Audio thread, at block start. `runtime` may be null - a solo player
+    // has no session, and local monitoring still has to sound. When it is
+    // null nothing remote is drained or scheduled, and no per-slot state
+    // is touched, so the first block after a session starts is not
+    // mistaken for every peer departing at once. cumulativeSamples is the
+    // index of this block's first frame and steadyNs is steady_clock at
+    // callback entry - the pair JuceAudioDevice::RecordBlock accumulates.
+    // Returns how many entries of `out` were filled.
     //
     // Allocation-free and lock-free throughout, so it is callable inside a
-    // RealtimeScope. `capacity` should be at least kMaxPeers: a block can
-    // owe one all-notes-off per slot, and those are emitted first
-    // precisely so a smaller array cannot drop them in favour of ordinary
-    // notes.
-    std::size_t Service(PeerRuntime& runtime, std::int64_t cumulativeSamples, std::int64_t steadyNs, Note* out,
+    // RealtimeScope. `capacity` should be at least kMaxPeers + 1: a panic
+    // owes one all-notes-off per slot plus one for the local monitor, and
+    // those are emitted first precisely so a smaller array cannot drop
+    // them in favour of ordinary notes.
+    std::size_t Service(PeerRuntime* runtime, std::int64_t cumulativeSamples, std::int64_t steadyNs, Note* out,
                         std::size_t capacity);
 
     const AudioClock& clock() const { return clock_; }
@@ -113,6 +169,15 @@ public:
         // The scheduler refused it: its queue is full, or it was late
         // enough to drop.
         std::uint64_t notesRejectedByScheduler = 0;
+        std::uint64_t localNotesScheduled = 0;
+        // A local note the scheduler refused, which for the local path can
+        // only be a full heap - ScheduleLocalEvent takes no deadline
+        // decision and so can never drop one for lateness. The most
+        // user-visible drop there is: it is the player's own note not
+        // sounding.
+        std::uint64_t localNotesRejectedByScheduler = 0;
+        std::uint64_t panicsServiced = 0;
+        std::uint64_t notesFlushedOnPanic = 0;
         // Discarded by a re-lock flush, summed over every peer.
         std::uint64_t notesFlushedOnReLock = 0;
         std::uint64_t reLocksSeen = 0;
@@ -130,10 +195,27 @@ public:
 
     const Stats& stats() const { return stats_; }
 
+    // How many SubmitLocalNote calls the ring has refused for being full.
+    // Kept out of Stats because it is written by the message thread while
+    // every other counter is the audio thread's - same split, and same
+    // relaxed diagnostics-only contract, as NoteCrossing::DroppedCount.
+    std::uint64_t LocalNotesDropped() const { return localNotesDropped_.load(std::memory_order_relaxed); }
+
 private:
     AudioClock clock_;
     EventScheduler scheduler_;
     Stats stats_;
+
+    // Message thread produces, audio thread consumes. Holds the event
+    // alone: a local note needs no peer id (it is always kLocalPeerId) and
+    // no timestamp (it is scheduled against the block's own `now`, which
+    // is what "never delayed" means in practice).
+    jamn::core::SpscRing<jamn::proto::NoteEvent, kLocalMonitorCapacity> localMonitor_;
+    std::atomic<std::uint64_t> localNotesDropped_{0};
+    // Set by the message thread, consumed by the audio thread at block
+    // start. A flag rather than a ring: panic carries no data, and the
+    // only question is whether one is owed.
+    std::atomic<bool> panicRequested_{false};
 
     // Last re-lock generation seen per slot, so a change can be noticed.
     // Audio-thread-owned: PeerRuntime deliberately does nothing about a

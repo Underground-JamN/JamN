@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 # C is enabled here, not just CXX, because ENet (fetched below) is a C
 # project; enabling C for the first time from a FetchContent subdirectory
 # instead of the top-level project() call breaks Ninja's generate step.
-project(JamN VERSION 0.2 LANGUAGES CXX C)
+project(JamN VERSION 0.3 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

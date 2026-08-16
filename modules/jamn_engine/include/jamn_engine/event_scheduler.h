@@ -49,7 +49,10 @@ public:
 
     // Always scheduled at zero added delay, in either resolver mode - a
     // player's own local input is never delayed to align with anyone
-    // else's timing (docs/CLOCK.md, non-negotiable).
+    // else's timing (docs/CLOCK.md's "One scheduler, two resolvers", the
+    // paragraph marked non-negotiable). Cited by section rather than by
+    // line: the two line-numbered citations this file and jamn_app once
+    // carried were both stale within days.
     bool ScheduleLocalEvent(const jamn::proto::NoteEvent& event, std::int64_t nowUs);
 
     // Applies the resolver + per-peer jitter-buffer deadline computation,
@@ -81,6 +84,13 @@ public:
     // the two.
     std::size_t FlushPeer(jamn::net::PeerId peer);
 
+    // Everything queued or held, for every peer including the local one,
+    // and returns how many entries that was. The panic path: a player
+    // reaching for it wants silence now, and a queue that survives would
+    // start sounding again on the next block. Silencing what is already
+    // sounding is the caller's, exactly as it is for FlushPeer.
+    std::size_t FlushAll();
+
     std::size_t ScheduledCount() const { return heapSize_; }
     std::size_t HeldCount() const { return heldCount_; }
 
@@ -96,6 +106,11 @@ public:
 private:
     struct HeapEntry {
         std::int64_t deadlineUs = 0;
+        // Ties on deadline are broken by arrival order, and that is a
+        // correctness requirement rather than tidiness - see HeapCompare.
+        // 64 bits at a player's ~100 events/s is longer than the universe
+        // has been running, so wrapping is not a case that needs handling.
+        std::uint64_t sequence = 0;
         jamn::net::PeerId peer = 0;
         jamn::proto::NoteEvent event;
     };
@@ -128,13 +143,28 @@ private:
 
     bool PushHeap(std::int64_t deadlineUs, jamn::net::PeerId peer, const jamn::proto::NoteEvent& event);
     void ReleaseDueHeldEvents(std::int64_t nowUs);
-    static bool HeapCompare(const HeapEntry& a, const HeapEntry& b) { return a.deadlineUs > b.deadlineUs; }
+    // Min-heap on deadline, then on arrival order. **The tie-break is not
+    // cosmetic.** Every local event scheduled in one block carries that
+    // block's single `now` as its deadline, so a fast run across the
+    // keys - mouse or, later, keyboard - puts a note's on and its own off
+    // in the heap with identical deadlines. std::push_heap/pop_heap are
+    // not stable, so ordering on deadline alone let an off be handed back
+    // before its on, and a note that is switched off before it starts
+    // sounds forever. Reported from a real drag, 2026-08-16.
+    static bool HeapCompare(const HeapEntry& a, const HeapEntry& b) {
+        if (a.deadlineUs != b.deadlineUs) return a.deadlineUs > b.deadlineUs;
+        return a.sequence > b.sequence;
+    }
 
     IDeadlineResolver* resolver_;
     LiveResolver defaultLiveResolver_;
 
     std::array<HeapEntry, kMaxScheduledEvents> heap_{};
     std::size_t heapSize_ = 0;
+    // Never reset, including by FlushPeer: it orders entries against each
+    // other, and restarting it while entries are still queued would make
+    // a new arrival sort ahead of one already waiting.
+    std::uint64_t nextSequence_ = 0;
 
     std::array<HeldEntry, kMaxHeldEvents> held_{};
     std::size_t heldCount_ = 0;

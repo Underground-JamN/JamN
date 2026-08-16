@@ -209,3 +209,49 @@ TEST_CASE("JamAudio renders a full run of blocks through FileAudioDevice without
     SetRealtimeViolationHandler(nullptr);
     REQUIRE_FALSE(reported);
 }
+
+TEST_CASE("JamAudio renders the local monitor instrument", "[dsp][jam_audio][fast]") {
+    ConstantInstrument instrument;
+    JamAudio audio;
+    audio.SetLocalInstrument(&instrument);
+    audio.SetGain(0.5f);
+    audio.Prepare(48000.0);
+
+    const int numFrames = 128;
+    std::vector<float> channel(numFrames, 0.0f);
+    float* channels[] = {channel.data()};
+    audio.Process(channels, 1, numFrames);
+
+    // One instrument at unity through a master gain of 0.5, with no strip
+    // in the path at all - the same exact figure the peer-mixer case
+    // above asserts, reached by the route that skips the mixer.
+    REQUIRE(channel.front() == 0.5f);
+    REQUIRE(audio.localInstrument() == &instrument);
+}
+
+TEST_CASE("JamAudio's local monitor is not mutable by a peer's solo", "[dsp][jam_audio][fast]") {
+    // The reason it is not a ninth strip. A player must always hear
+    // themselves, including while somebody else is soloed - a strip would
+    // put that under another peer's control.
+    const int numFrames = 128;
+
+    ConstantInstrument peer;
+    ConstantInstrument local;
+    JamAudio audio;
+    audio.peers().strip(0).SetInstrument(&peer);
+    audio.peers().strip(0).SetSolo(true);
+    audio.SetLocalInstrument(&local);
+    // Below full scale for the same reason the blip case above is: at
+    // unity the limiter would flatten the sum back onto the soloed peer's
+    // own ceiling and the comparison could not see the difference.
+    audio.SetGain(0.25f);
+    audio.Prepare(48000.0);
+
+    std::vector<float> channel(numFrames, 0.0f);
+    float* channels[] = {channel.data()};
+    audio.Process(channels, 1, numFrames);
+
+    // Both sources at unity, so the sum is twice what the soloed peer
+    // reaches alone.
+    REQUIRE(channel.front() == 0.5f);
+}

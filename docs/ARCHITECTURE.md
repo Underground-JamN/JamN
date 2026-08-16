@@ -82,11 +82,15 @@ whatever thread a test happens to call them from.
 
 Phase 0's audio path lives on one of two threads: the message thread
 (button clicks, slider drags, anything JUCE delivers as a UI event)
-and the audio thread (the real-time callback). The only place they
-cross in the code that exists today is `TriggerRing`, a single
-`SpscRing` instance - `JamAudio::Trigger()` pushes from the message
-thread, `JamAudio::Process()` pops from the audio thread, and nothing
-else touches that ring. Gain, mixer controls and device state cross the
+and the audio thread (the real-time callback). They cross in exactly
+two places, both a single `SpscRing` instance and nothing else:
+`TriggerRing`, where `JamAudio::Trigger()` pushes and
+`JamAudio::Process()` pops; and T6.1's local-monitoring ring inside
+`AudioRuntime`, where a player's own notes are pushed by the message
+thread and drained at block start. The second has one producer because
+every local input source - the on-screen piano today, computer-keyboard
+capture when it exists - funnels through one message-thread entry point
+in `jamn_app` before reaching it. Gain, mixer controls and device state cross the
 same boundary through plain atomics (`MasterBus`'s gain target, each
 `Strip`'s volume/mute/solo and its non-owning instrument pointer,
 `JuceAudioDevice`'s `sampleRate_`/`blockSize_`), never through a lock.

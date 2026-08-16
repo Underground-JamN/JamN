@@ -25,6 +25,7 @@
 #include "jamn_dsp/jam_audio.h"
 #include "jamn_dsp/test_tone_instrument.h"
 #include "jamn_engine/audio_runtime.h"
+#include "jamn_engine/event_scheduler.h"
 #include "jamn_engine/net_thread.h"
 #include "jamn_engine/peer_runtime.h"
 #include "jamn_net/enet_transport.h"
@@ -593,7 +594,7 @@ int RunHeadlessNetSession(jamn::net::EnetTransport& transport, const NetOptions&
         // exact one, since nothing below asserts on its estimate.
         const std::int64_t frames = (nowUs - startUs) * 48;
         std::array<jamn::engine::AudioRuntime::Note, jamn::engine::AudioRuntime::kMaxNotesPerBlock> notes;
-        const std::size_t count = audioSide.Service(runtime, frames, NowNs(), notes.data(), notes.size());
+        const std::size_t count = audioSide.Service(&runtime, frames, NowNs(), notes.data(), notes.size());
         for (std::size_t index = 0; index < count; ++index) {
             const jamn::engine::AudioRuntime::Note& note = notes[index];
             const auto key = std::make_pair(note.peer, note.event.a);
@@ -822,17 +823,21 @@ public:
         for (std::size_t slot = 0; slot < jamn::core::kMaxPeers; ++slot) {
             audio_.peers().strip(slot).SetInstrument(&peerInstruments_[slot]);
         }
+        // Outside the mixer, so no peer's mute or solo can silence the
+        // player to themselves - see JamAudio::SetLocalInstrument.
+        audio_.SetLocalInstrument(&localInstrument_);
 
         const std::string error = device_.Open(
             2,
             [this](double sampleRate, int blockSize) {
                 audio_.Prepare(sampleRate);
                 for (auto& instrument : peerInstruments_) instrument.Prepare(sampleRate);
+                localInstrument_.Prepare(sampleRate);
                 audioSession_.Prepare(sampleRate, blockSize);
                 audioFrames_ = 0;
             },
             [this](float* const* out, int numChannels, int numFrames) {
-                DispatchRemoteNotes(numFrames);
+                DispatchNotes(numFrames);
                 audio_.Process(out, numChannels, numFrames);
             },
             g_deviceOptions.blockSize, g_deviceOptions.sampleRate, g_deviceOptions.name);
@@ -848,9 +853,21 @@ public:
         auto content = std::make_unique<jamn::ui::JamWindowContent>();
         content->onButtonClicked = [this] {
             audio_.Trigger();
-            PlayNoteToPeers();
+            PlayNote();
         };
         content->onGainChanged = [this](float gain) { audio_.SetGain(gain); };
+        // Both go to the same entry point the computer keyboard will, so
+        // a mouse-played note is indistinguishable from a typed one by
+        // the time it reaches the ring.
+        content->onNotePressed = [this](std::uint8_t pitch) {
+            SubmitLocalNote(jamn::proto::NoteEventKind::kNoteOn, pitch);
+        };
+        content->onNoteReleased = [this](std::uint8_t pitch) {
+            SubmitLocalNote(jamn::proto::NoteEventKind::kNoteOff, pitch);
+        };
+        // Local only, and deliberately: panic silences this machine, it
+        // does not reach across the wire and mute anyone else's playing.
+        content->onPanicClicked = [this] { audioSession_.RequestPanic(); };
         // The slider is constructed with dontSendNotification (see
         // jam_window_content.cpp), so onGainChanged never fires on its
         // own for the initial value - without this, MasterBus would sit
@@ -865,7 +882,7 @@ public:
         // Reverse of the order these came up in, and it is not merely
         // tidiness. Three participants borrow downward - net_ borrows
         // runtime_, which borrows transport_, and since T5.3 the **audio
-        // thread borrows runtime_ too**, through DispatchRemoteNotes. So
+        // thread borrows runtime_ too**, through DispatchNotes. So
         // both threads have to be stopped before runtime_ is destroyed,
         // and each stop is a join in its own way: NetThread::Stop() joins
         // the net thread, and Close() cannot return while an audio
@@ -902,19 +919,46 @@ public:
     void systemRequestedQuit() override { quit(); }
 
 private:
-    // Sends one note to every peer, so a remote note can be heard before
-    // Wave 6's real input path exists. This is not that path and does not
-    // pre-empt it: T6.1 is per-OS raw scan codes with 6-key rollover, and
-    // this is a button.
-    //
-    // The local blip still sounds through BlipVoice as it always did. A
-    // player does not hear this note locally - only peers do - because
-    // nothing routes local input to a local instrument yet, which is also
-    // Wave 6's. So the test is "click here, hear it over there."
-    void PlayNoteToPeers() {
-        jamn::engine::PeerRuntime* runtime = runtime_.get();
-        if (runtime == nullptr) return;
+    // Fixed, because T6.1 has no velocity: nothing that reaches
+    // SubmitLocalNote can express one yet - a computer key is down or it
+    // is not - so inventing a curve here would be a number with no input
+    // behind it.
+    static constexpr std::uint8_t kLocalVelocity = 100;
 
+    // **The one message-thread entry point every local input source
+    // funnels through**, and the reason the ring below it needs no merge
+    // step: AudioRuntime's local-monitoring ring is a single-producer
+    // SpscRing, and "single producer" holds because every source arrives
+    // here first. The button is the only source today; T6.1's keyboard
+    // capture and mouse strip join it here rather than beside it.
+    void SubmitLocalNote(jamn::proto::NoteEventKind kind, std::uint8_t pitch) {
+        jamn::proto::NoteEvent event;
+        event.kind = kind;
+        event.a = pitch;
+        // A note-off leaves velocity at zero, the way this path always
+        // did - the field means nothing for one, and the wire bytes stay
+        // what they were.
+        if (kind == jamn::proto::NoteEventKind::kNoteOn) event.b = kLocalVelocity;
+
+        // Monitoring first, and not for the microseconds: it is the half
+        // that has to happen whether or not there is a session at all. A
+        // player running solo still hears themselves.
+        audioSession_.SubmitLocalNote(event);
+
+        if (jamn::engine::PeerRuntime* runtime = runtime_.get(); runtime != nullptr) {
+            runtime->SubmitLocalEvent(event, NowUs());
+        }
+    }
+
+    // Plays one note locally and sends it to every peer. Still a button
+    // and still not T6.1's real input path - that is per-OS raw scan codes
+    // with 6-key rollover - but it now goes through the same entry point
+    // that path will, so what it exercises is the real thing rather than a
+    // stand-in.
+    //
+    // The local blip still sounds through BlipVoice as it always did,
+    // separately: that one proves the device, this one proves the note.
+    void PlayNote() {
         // Walks a pentatonic rather than repeating one pitch, so several
         // clicks are audibly distinct - "did the note arrive" is a much
         // harder question to answer when every note is the same one, and
@@ -923,37 +967,40 @@ private:
         const std::uint8_t pitch = kScale[nextNote_ % (sizeof(kScale) / sizeof(kScale[0]))];
         ++nextNote_;
 
-        jamn::proto::NoteEvent on;
-        on.kind = jamn::proto::NoteEventKind::kNoteOn;
-        on.a = pitch;
-        on.b = 100;  // Velocity. TestToneInstrument is the only consumer today.
-        runtime->SubmitLocalEvent(on, NowUs());
+        SubmitLocalNote(jamn::proto::NoteEventKind::kNoteOn, pitch);
 
         // The note-off goes out on its own, later, from the message thread
         // - the only thread allowed to submit. Sending it now with a future
         // timestamp would be the obvious shortcut and the wrong one: the
         // burst assembler would ship both in the same burst and the
         // receiver would schedule a note that is already over.
-        juce::Timer::callAfterDelay(250, [this, pitch] {
-            jamn::engine::PeerRuntime* live = runtime_.get();
-            if (live == nullptr) return;
-            jamn::proto::NoteEvent off;
-            off.kind = jamn::proto::NoteEventKind::kNoteOff;
-            off.a = pitch;
-            live->SubmitLocalEvent(off, NowUs());
-        });
+        juce::Timer::callAfterDelay(
+            250, [this, pitch] { SubmitLocalNote(jamn::proto::NoteEventKind::kNoteOff, pitch); });
     }
 
     // The audio thread, at block start, and the entire jamn_app half of
-    // T5.3. Everything with a decision in it - draining the crossing,
-    // converting out of the sender's timebase, scheduling, the re-lock
-    // flush - is AudioRuntime's, in a JUCE-free module that `ctest -L
-    // fast` and both sanitizer presets can see. What is left here is
-    // turning a NoteEvent into an instrument call, because only this
-    // module links both jamn_engine and jamn_dsp.
-    void DispatchRemoteNotes(int numFrames) {
+    // T5.3 and T6.1. Everything with a decision in it - draining the
+    // crossing and the local ring, converting out of the sender's
+    // timebase, scheduling, the re-lock flush - is AudioRuntime's, in a
+    // JUCE-free module that `ctest -L fast` and both sanitizer presets can
+    // see. What is left here is turning a NoteEvent into an instrument
+    // call, because only this module links both jamn_engine and jamn_dsp.
+    //
+    // **Runs with or without a session.** It returned early on a null
+    // runtime until T6.1, which was right while every note was somebody
+    // else's; local monitoring is not, so the early return would now make
+    // a solo player silent. AudioRuntime::Service takes the null.
+    //
+    // The `runtime_` read is formally a race: initialise() opens the
+    // device before StartNetSession() assigns it, so this thread reads a
+    // pointer the message thread writes once, later. Neither sanitizer
+    // preset can see it - both are core-only scope, and this file is not
+    // in it - so it is written down here rather than left to be
+    // rediscovered. Benign in practice on every platform this targets (an
+    // aligned pointer word), and the fix if it ever stops being benign is
+    // an atomic in this class, not a lock on the audio thread.
+    void DispatchNotes(int numFrames) {
         jamn::engine::PeerRuntime* runtime = runtime_.get();
-        if (runtime == nullptr) return;
 
         // Its own frame counter and clock read rather than
         // JuceAudioDevice's: the device's pair is a measurement taken for
@@ -966,12 +1013,25 @@ private:
 
         std::array<jamn::engine::AudioRuntime::Note, jamn::engine::AudioRuntime::kMaxNotesPerBlock> notes;
         const std::size_t count =
-            audioSession_.Service(*runtime, blockFirstFrame, steadyNs, notes.data(), notes.size());
+            audioSession_.Service(runtime, blockFirstFrame, steadyNs, notes.data(), notes.size());
 
         for (std::size_t index = 0; index < count; ++index) {
             const jamn::engine::AudioRuntime::Note& note = notes[index];
-            if (note.slot >= jamn::core::kMaxPeers) continue;
-            jamn::dsp::IInstrument* instrument = audio_.peers().strip(note.slot).instrument();
+
+            // **Slot first, peer id second**, and the order matters.
+            // Local input owns no slot, so a note that has one belongs to
+            // a strip; a note without one is the local monitor's if its
+            // peer says so, and skipped otherwise (a remote note whose
+            // peer had already left its slot). Testing the peer id first
+            // would misroute panic's all-notes-off for an *empty* slot,
+            // because PeerRuntime::kNoPeer and kLocalPeerId are the same
+            // 0xFFFF - the slot is the unambiguous half of the pair.
+            jamn::dsp::IInstrument* instrument = nullptr;
+            if (note.slot < jamn::core::kMaxPeers) {
+                instrument = audio_.peers().strip(note.slot).instrument();
+            } else if (note.peer == jamn::engine::EventScheduler::kLocalPeerId) {
+                instrument = &localInstrument_;
+            }
             if (instrument == nullptr) continue;
 
             switch (note.event.kind) {
@@ -1003,7 +1063,7 @@ private:
         net_ = std::make_unique<jamn::engine::NetThread>(*runtime_);
         net_->Start();
         // The audio thread drains runtime_->crossing() from
-        // DispatchRemoteNotes above, which is the only consumer - the
+        // DispatchNotes above, which is the only consumer - the
         // single-consumer half of NoteCrossing's SPSC contract.
     }
 
@@ -1019,6 +1079,10 @@ private:
     // Declared before device_ for the same reason audio_ is: the audio
     // thread must never reach a destroyed instrument.
     std::array<jamn::dsp::TestToneInstrument, jamn::core::kMaxPeers> peerInstruments_;
+    // The player's own monitoring. Same type as a peer's for now, and
+    // owned here for the same lifetime reason - JamAudio holds a borrowed
+    // pointer to it and the audio thread must never reach it destroyed.
+    jamn::dsp::TestToneInstrument localInstrument_;
     jamn::engine::AudioRuntime audioSession_;
     // Audio thread only, reset at every device start.
     std::int64_t audioFrames_ = 0;

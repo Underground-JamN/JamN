@@ -1,9 +1,11 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 
 #include "jamn_core/spsc_ring.h"
 #include "jamn_dsp/blip_voice.h"
+#include "jamn_dsp/instrument.h"
 #include "jamn_dsp/master_bus.h"
 #include "jamn_dsp/peer_mixer.h"
 
@@ -43,12 +45,24 @@ public:
     PeerMixer& peers() noexcept;
     const PeerMixer& peers() const noexcept;
 
+    // Message thread, and the pointer must outlive every Process call. The
+    // player's own monitoring, rendered outside PeerMixer for the same
+    // reason BlipVoice is and one more: a strip carries a mute, a solo and
+    // a volume, and a player must always hear themselves - not at the
+    // mercy of a control aimed at somebody else. Not a ninth strip, not
+    // owned here.
+    void SetLocalInstrument(IInstrument* instrument) noexcept;
+    IInstrument* localInstrument() const noexcept;
+
     // Audio thread. Matches jamn::core::AudioCallback's shape exactly.
     void Process(float* const* outputChannels, int numChannels, int numFrames) noexcept;
 
 private:
     TriggerRing triggers_;
     BlipVoice voice_;
+    // Atomic for the same reason Strip's is: the message thread sets it
+    // while the audio thread is rendering.
+    std::atomic<IInstrument*> localInstrument_{nullptr};
     PeerMixer peerMixer_;
     MasterBus masterBus_;
 };

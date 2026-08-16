@@ -136,6 +136,35 @@ TEST_CASE("PopReady delivers events in deadline order regardless of scheduling o
     REQUIRE_FALSE(scheduler.PopReady(3000, delivery));
 }
 
+TEST_CASE("PopReady delivers events that tie on deadline in the order they arrived",
+          "[engine][event_scheduler][fast]") {
+    // The companion to the case above, and the one a real bug came from:
+    // every local event scheduled in one audio block carries that block's
+    // single `now`, so ties are the normal case for local input, not an
+    // edge one. std::push_heap/pop_heap are not stable, so without an
+    // explicit tie-break a note's off could be delivered before its own
+    // on - which sounds forever, because nothing switches it off again.
+    // Found by dragging the mouse fast across the on-screen piano.
+    EventScheduler scheduler;
+
+    constexpr std::uint16_t kCount = 12;
+    for (std::uint16_t index = 0; index < kCount; ++index) {
+        NoteEvent event = MakeEvent(index % 2 == 0 ? NoteEventKind::kNoteOn : NoteEventKind::kNoteOff);
+        event.eventSeq = index;
+        REQUIRE(scheduler.ScheduleLocalEvent(event, 5000));
+    }
+
+    // Twelve, not two: a two-element heap happens to come out in order
+    // whatever the comparator does, so a smaller case would pass against
+    // the very bug this pins.
+    EventScheduler::Delivery delivery;
+    for (std::uint16_t index = 0; index < kCount; ++index) {
+        REQUIRE(scheduler.PopReady(5000, delivery));
+        REQUIRE(delivery.event.eventSeq == index);
+    }
+    REQUIRE_FALSE(scheduler.PopReady(5000, delivery));
+}
+
 TEST_CASE("An event whose state_rev is ahead of local_rev is held, not dropped or played early",
           "[engine][event_scheduler][fast]") {
     EventScheduler scheduler;
@@ -194,4 +223,32 @@ TEST_CASE("EventScheduler's real-time guard is actually armed in this binary", "
 
     SetRealtimeViolationHandler(nullptr);
     REQUIRE(reported);
+}
+
+TEST_CASE("FlushAll discards every queued and held event, for every peer",
+          "[engine][event_scheduler][fast]") {
+    // What panic needs and FlushPeer cannot express: a player reaching
+    // for it has no peer in mind.
+    EventScheduler scheduler;
+    const PeerId peer = 7;
+    scheduler.SetLocalRev(peer, 0);
+
+    REQUIRE(scheduler.ScheduleLocalEvent(MakeEvent(NoteEventKind::kNoteOn), 1000));
+    REQUIRE(scheduler.ScheduleRemoteEvent(peer, MakeEvent(NoteEventKind::kNoteOn), 1000, 1000));
+    // One held for a state_rev it has not seen, so both stores are
+    // non-empty when the flush lands.
+    REQUIRE(scheduler.ScheduleRemoteEvent(peer, MakeEvent(NoteEventKind::kNoteOn, /*stateRev=*/5), 1000, 1000));
+    REQUIRE(scheduler.ScheduledCount() == 2);
+    REQUIRE(scheduler.HeldCount() == 1);
+
+    REQUIRE(scheduler.FlushAll() == 3);
+    REQUIRE(scheduler.ScheduledCount() == 0);
+    REQUIRE(scheduler.HeldCount() == 0);
+
+    EventScheduler::Delivery delivery;
+    REQUIRE_FALSE(scheduler.PopReady(200'000, delivery));
+
+    // Still usable afterwards - panic is not a teardown.
+    REQUIRE(scheduler.ScheduleLocalEvent(MakeEvent(NoteEventKind::kNoteOn), 2000));
+    REQUIRE(scheduler.PopReady(2000, delivery));
 }
